@@ -9,6 +9,7 @@ use PVE::RESTHandler;
 use PVE::RPCEnvironment;
 use PVE::JSONSchema qw(get_standard_option);
 use PVE::Cluster;
+use PVE::APIClient::LWP;
 use PVE::Corosync;
 
 use base qw(PVE::RESTHandler);
@@ -39,7 +40,8 @@ __PACKAGE__->register_method({
 	my $result = [
 	    { name => 'nodes' },
 	    { name => 'totem' },
-	    ];
+	    { name => 'join' },
+	];
 
 	return $result;
     }});
@@ -93,7 +95,6 @@ my $config_change_lock = sub {
 	}
     });
 };
-
 
 __PACKAGE__->register_method ({
     name => 'addnode',
@@ -304,6 +305,128 @@ __PACKAGE__->register_method ({
 
 	return undef;
     }});
+
+__PACKAGE__->register_method ({
+    name => 'join',
+    path => 'join',
+    method => 'POST',
+    protected => 1,
+    description => "Joins this node into an existing cluster.",
+    parameters => {
+	additionalProperties => 0,
+	properties => {
+	    hostname => {
+		type => 'string',
+		description => "Hostname (or IP) of an existing cluster member."
+	    },
+	    nodeid => {
+		type => 'integer',
+		description => "Node id for this node.",
+		minimum => 1,
+		optional => 1,
+	    },
+	    votes => {
+		type => 'integer',
+		description => "Number of votes for this node",
+		minimum => 0,
+		optional => 1,
+	    },
+	    force => {
+		type => 'boolean',
+		description => "Do not throw error if node already exists.",
+		optional => 1,
+	    },
+	    ring0_addr => {
+		type => 'string', format => 'address',
+		description => "Hostname (or IP) of the corosync ring0 address of this node.".
+		    " Defaults to nodes hostname.",
+		optional => 1,
+	    },
+	    ring1_addr => {
+		type => 'string', format => 'address',
+		description => "Hostname (or IP) of the corosync ring1 address, this".
+		    " needs an valid configured ring 1 interface in the cluster.",
+		optional => 1,
+	    },
+	    fingerprint => get_standard_option('fingerprint-sha256', {
+		description => "SSL certificate fingerprint. Optional in CLI environment.",
+		optional => 1,
+	    }),
+	    password => {
+		description => "Superuser (root) password of peer node.",
+		type => 'string',
+		maxLength => 128,
+	    },
+	},
+    },
+    returns => { type => 'string' },
+    code => sub {
+	my ($param) = @_;
+
+	my $nodename = PVE::INotify::nodename();
+	my $rpcenv = PVE::RPCEnvironment::get();
+	my $authuser = $rpcenv->get_user();
+
+	my $worker = sub {
+	    PVE::Cluster::setup_sshd_config();
+	    PVE::Cluster::setup_rootsshconfig();
+	    PVE::Cluster::setup_ssh_keys();
+
+	    # check if we can join with the given parameters and current node state
+	    my ($ring0_addr, $ring1_addr) = $param->@{'ring0_addr', 'ring1_addr'};
+	    PVE::Cluster::assert_joinable($ring0_addr, $ring1_addr, $param->{force});
+
+	    # make sure known_hosts is on local filesystem
+	    PVE::Cluster::ssh_unmerge_known_hosts();
+
+	    my $host = $param->{hostname};
+
+	    my $conn_args = {
+		username => 'root@pam',
+		password => $param->{password},
+		cookie_name => 'PVEAuthCookie',
+		protocol => 'https',
+		host => $host,
+		port => 8006,
+	    };
+
+	    if (my $fp = $param->{fingerprint}) {
+		$conn_args->{cached_fingerprints} = { uc($fp) => 1 };
+	    } elsif ($rpcenv->{type} eq 'cli') {
+		$conn_args->{manual_verification} = 1;
+	    } else {
+		raise_param_exc({
+		    fingerprint => "'fingerprint' only optional in interactive CLI environment."
+		});
+	    }
+
+	    print "Etablishing API connection with host '$host'\n";
+
+	    my $conn = PVE::APIClient::LWP->new(%$conn_args);
+	    $conn->login();
+
+	    # login raises an exception on failure, so if we get here we're good
+	    print "Login succeeded.\n";
+
+	    my $args = {};
+	    $args->{force} = $param->{force} if defined($param->{force});
+	    $args->{nodeid} = $param->{nodeid} if $param->{nodeid};
+	    $args->{votes} = $param->{votes} if defined($param->{votes});
+	    $args->{ring0_addr} = $ring0_addr if defined($ring0_addr);
+	    $args->{ring1_addr} = $ring1_addr if defined($ring1_addr);
+
+	    print "Request addition of this node\n";
+	    my $res = $conn->post("/cluster/config/nodes/$nodename", $args);
+
+	    print "Join request OK, finishing setup locally\n";
+
+	    # added successfuly - now prepare local node
+	    PVE::Cluster::finish_join($nodename, $res->{corosync_conf}, $res->{corosync_authkey});
+	};
+
+	return $rpcenv->fork_worker('clusterjoin', '',  $authuser, $worker);
+    }});
+
 
 __PACKAGE__->register_method({
     name => 'totem',
