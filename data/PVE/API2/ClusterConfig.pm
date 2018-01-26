@@ -16,6 +16,7 @@ use base qw(PVE::RESTHandler);
 
 my $clusterconf = "/etc/pve/corosync.conf";
 my $authfile = "/etc/corosync/authkey";
+my $local_cluster_change_lock = "/var/lock/pvecm.lock";
 
 my $ring0_desc = {
     type => 'string', format => 'address',
@@ -118,7 +119,7 @@ __PACKAGE__->register_method ({
 	my $rpcenv = PVE::RPCEnvironment::get();
 	my $authuser = $rpcenv->get_user();
 
-	my $worker = sub {
+	my $code = sub {
 	    PVE::Cluster::setup_sshd_config(1);
 	    PVE::Cluster::setup_rootsshconfig();
 	    PVE::Cluster::setup_ssh_keys();
@@ -142,6 +143,10 @@ __PACKAGE__->register_method ({
 
 	    print "Restart corosync and cluster filesystem\n";
 	    PVE::Tools::run_command('systemctl restart corosync pve-cluster');
+	};
+
+	my $worker = sub {
+	    PVE::Tools::lock_file($local_cluster_change_lock, 10, $code);
 	};
 
 	return $rpcenv->fork_worker('clustercreate', '',  $authuser, $worker);
@@ -185,8 +190,7 @@ __PACKAGE__->register_method({
 my $config_change_lock = sub {
     my ($code) = @_;
 
-    my $local_lock_fn = "/var/lock/pvecm.lock";
-    PVE::Tools::lock_file($local_lock_fn, 10, sub {
+    PVE::Tools::lock_file($local_cluster_change_lock, 10, sub {
 	PVE::Cluster::cfs_update(1);
 	my $members = PVE::Cluster::get_members();
 	if (scalar(keys %$members) > 1) {
@@ -509,7 +513,7 @@ __PACKAGE__->register_method ({
 	my $rpcenv = PVE::RPCEnvironment::get();
 	my $authuser = $rpcenv->get_user();
 
-	my $worker = sub {
+	my $code = sub {
 	    PVE::Cluster::setup_sshd_config();
 	    PVE::Cluster::setup_rootsshconfig();
 	    PVE::Cluster::setup_ssh_keys();
@@ -565,6 +569,10 @@ __PACKAGE__->register_method ({
 
 	    # added successfuly - now prepare local node
 	    PVE::Cluster::finish_join($nodename, $res->{corosync_conf}, $res->{corosync_authkey});
+	};
+
+	my $worker = sub {
+	    PVE::Tools::lock_file($local_cluster_change_lock, 10, $code);
 	};
 
 	return $rpcenv->fork_worker('clusterjoin', '',  $authuser, $worker);
