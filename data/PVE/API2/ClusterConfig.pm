@@ -487,7 +487,7 @@ __PACKAGE__->register_method ({
 		optional => 1,
 	    },
 	    ring0_addr => get_standard_option('corosync-ring0-addr', {
-		default => 'node\'s hostname',
+		default => "IP resolved by node's hostname",
 	    }),
 	    ring1_addr => get_standard_option('corosync-ring1-addr'),
 	    fingerprint => get_standard_option('fingerprint-sha256', {
@@ -522,6 +522,7 @@ __PACKAGE__->register_method ({
 	    PVE::Cluster::ssh_unmerge_known_hosts();
 
 	    my $host = $param->{hostname};
+	    my $local_ip_address = PVE::Cluster::remote_node_ip($nodename);
 
 	    my $conn_args = {
 		username => 'root@pam',
@@ -554,7 +555,7 @@ __PACKAGE__->register_method ({
 	    $args->{force} = $param->{force} if defined($param->{force});
 	    $args->{nodeid} = $param->{nodeid} if $param->{nodeid};
 	    $args->{votes} = $param->{votes} if defined($param->{votes});
-	    $args->{ring0_addr} = $ring0_addr if defined($ring0_addr);
+	    $args->{ring0_addr} = $ring0_addr // $local_ip_address;
 	    $args->{ring1_addr} = $ring1_addr if defined($ring1_addr);
 
 	    print "Request addition of this node\n";
